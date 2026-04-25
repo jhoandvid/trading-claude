@@ -28,6 +28,7 @@ import json
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -76,6 +77,39 @@ def _safe(fn, *args, **kwargs):
         return {"error": True, "status": e.status, "message": str(e)}
     except Exception as e:  # noqa: BLE001
         return {"error": True, "message": f"{type(e).__name__}: {e}"}
+
+
+# Cache simple con TTL para exchangeInfo: el símbolo no cambia entre
+# llamadas seguidas (p.ej. cuando analizas varios tokens en lote).
+_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+_INFO_TTL_SECONDS = 300.0  # 5 min
+
+
+def _cached_exchange_info(symbol: str) -> dict:
+    now = time.time()
+    cached = _INFO_CACHE.get(symbol)
+    if cached and now - cached[0] < _INFO_TTL_SECONDS:
+        return cached[1]
+    data = _safe(get_exchange_info, symbol)
+    if _is_ok(data):
+        _INFO_CACHE[symbol] = (now, data)
+    return data
+
+
+def _run_parallel(tasks: dict[str, tuple], max_workers: int = 12) -> dict:
+    """Ejecuta `_safe(fn, *args)` para cada (name -> (fn, args)) en paralelo.
+
+    Las llamadas HTTP son I/O bound, así que threading sirve perfectamente
+    sin tener que migrar a async.
+    """
+    results: dict[str, object] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {
+            name: ex.submit(_safe, fn, *args) for name, (fn, args) in tasks.items()
+        }
+        for name, fut in futures.items():
+            results[name] = fut.result()
+    return results
 
 
 def _is_ok(payload) -> bool:
@@ -666,40 +700,7 @@ def detect_market_regime(klines: dict, ticker24: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 8. higher timeframe context
-# ---------------------------------------------------------------------------
-
-
-def get_higher_tf_context(symbol: str) -> dict:
-    """Lectura ligera de 4h y 1d (solo trend + cercanía a niveles)."""
-    out: dict = {}
-    for tf, limit in (("4h", 250), ("1d", 250)):
-        k = _safe(get_klines_analysis, symbol, tf, limit)
-        if not _is_ok(k):
-            out[tf] = {"error": True}
-            continue
-        last_close = k.get("lastCandle", {}).get("close")
-        sup = k.get("supports", [])
-        res = k.get("resistances", [])
-        out[tf] = {
-            "trend": k.get("trend"),
-            "structure": k.get("structure", {}).get("structure"),
-            "rsi14": k.get("indicators", {}).get("rsi14"),
-            "lastClose": last_close,
-            "nearestSupport": sup[0] if sup else None,
-            "nearestResistance": res[0] if res else None,
-            "nearMajorResistance": bool(
-                res and last_close and _pct_distance(last_close, res[0]) < 1.0
-            ),
-            "nearMajorSupport": bool(
-                sup and last_close and _pct_distance(last_close, sup[0]) < 1.0
-            ),
-        }
-    return out
-
-
-# ---------------------------------------------------------------------------
-# 9. microestructura (igual que v2)
+# 8. microestructura
 # ---------------------------------------------------------------------------
 
 
@@ -1208,7 +1209,9 @@ def analyze_crypto(
     started = time.time()
     symbol = f"{token.upper()}{quote.upper()}"
 
-    info = _safe(get_exchange_info, symbol)
+    # 1) exchangeInfo va primero (cacheado): si el símbolo no existe, abortamos
+    #    sin gastar las otras 17 llamadas.
+    info = _cached_exchange_info(symbol)
     if not _is_ok(info) or not info.get("valid"):
         return {
             "token": token.upper(),
@@ -1218,33 +1221,99 @@ def analyze_crypto(
             "exchangeInfo": info,
         }
 
-    price = _safe(get_ticker_price, symbol)
+    # 2) Construimos la batería de llamadas independientes y las disparamos
+    #    todas en paralelo. avg_price y open_interest se llaman SIN spot_price;
+    #    los campos derivados (deviationPct, openInterestNotional) se calculan
+    #    después, sin volver a llamar.
+    tasks: dict[str, tuple] = {
+        "price":     (get_ticker_price,         (symbol,)),
+        "avg":       (get_avg_price,            (symbol,)),
+        "ticker24":  (get_ticker_24h,           (symbol,)),
+        "window":    (get_ticker_window,        (symbol, window_size)),
+        "klines":    (get_klines_analysis,      (symbol, interval, klines_limit)),
+        "depth":     (get_order_book_analysis,  (symbol, depth_limit)),
+        "trades":    (get_recent_trades,        (symbol, trades_limit)),
+        "agg":       (get_agg_trades,           (symbol, agg_trades_limit)),
+        "book":      (get_book_ticker,          (symbol,)),
+    }
+    if include_futures:
+        tasks.update({
+            "f24":     (get_futures_ticker_24h, (symbol,)),
+            "oi":      (get_open_interest,      (symbol,)),
+            "funding": (get_funding_rate,       (symbol,)),
+            "premium": (get_premium_index,      (symbol,)),
+        })
+    if include_higher_tf:
+        tasks.update({
+            "klines_4h": (get_klines_analysis, (symbol, "4h", 250)),
+            "klines_1d": (get_klines_analysis, (symbol, "1d", 250)),
+        })
+
+    results = _run_parallel(tasks, max_workers=min(len(tasks), 16))
+
+    price = results["price"]
     spot_price = price["price"] if _is_ok(price) else None
 
-    avg = _safe(get_avg_price, symbol, current_price=spot_price)
-    ticker24 = _safe(get_ticker_24h, symbol)
-    window = _safe(get_ticker_window, symbol, window_size)
-    klines = _safe(get_klines_analysis, symbol, interval, klines_limit)
-    depth = _safe(get_order_book_analysis, symbol, depth_limit)
-    trades = _safe(get_recent_trades, symbol, trades_limit)
-    agg = _safe(get_agg_trades, symbol, agg_trades_limit)
-    book = _safe(get_book_ticker, symbol)
+    # Enriquecimiento post-paralelo (no requiere nuevas llamadas HTTP).
+    avg = results["avg"]
+    if spot_price and _is_ok(avg) and avg.get("avgPrice"):
+        dev = (spot_price - avg["avgPrice"]) / avg["avgPrice"] * 100
+        avg["deviationPct"] = round(dev, 4)
+        if abs(dev) < 0.1:
+            avg["deviationLabel"] = "EN_PROMEDIO"
+        elif dev > 0.5:
+            avg["deviationLabel"] = "POR_ENCIMA"
+        elif dev < -0.5:
+            avg["deviationLabel"] = "POR_DEBAJO"
+        else:
+            avg["deviationLabel"] = "CERCANO"
 
-    futures_block = None
+    ticker24 = results["ticker24"]
+    window = results["window"]
+    klines = results["klines"]
+    depth = results["depth"]
+    trades = results["trades"]
+    agg = results["agg"]
+    book = results["book"]
+
     funding = {"error": True, "message": "Futures omitido"}
+    futures_block = None
     if include_futures:
-        f24 = _safe(get_futures_ticker_24h, symbol)
-        oi = _safe(get_open_interest, symbol, current_price=spot_price)
-        funding = _safe(get_funding_rate, symbol)
-        premium = _safe(get_premium_index, symbol)
+        oi = results["oi"]
+        if spot_price and _is_ok(oi) and oi.get("openInterest"):
+            oi["openInterestNotional"] = round(oi["openInterest"] * spot_price, 2)
+        funding = results["funding"]
         futures_block = {
-            "ticker24h": f24,
+            "ticker24h": results["f24"],
             "openInterest": oi,
             "fundingRate": funding,
-            "premiumIndex": premium,
+            "premiumIndex": results["premium"],
         }
 
-    higher_tf = get_higher_tf_context(symbol) if include_higher_tf else {}
+    higher_tf = {}
+    if include_higher_tf:
+        for tf, key in (("4h", "klines_4h"), ("1d", "klines_1d")):
+            k = results[key]
+            if not _is_ok(k):
+                higher_tf[tf] = {"error": True}
+                continue
+            last_close = k.get("lastCandle", {}).get("close")
+            sup = k.get("supports", [])
+            res = k.get("resistances", [])
+            higher_tf[tf] = {
+                "trend": k.get("trend"),
+                "structure": k.get("structure", {}).get("structure"),
+                "rsi14": k.get("indicators", {}).get("rsi14"),
+                "lastClose": last_close,
+                "nearestSupport": sup[0] if sup else None,
+                "nearestResistance": res[0] if res else None,
+                "nearMajorResistance": bool(
+                    res and last_close and _pct_distance(last_close, res[0]) < 1.0
+                ),
+                "nearMajorSupport": bool(
+                    sup and last_close and _pct_distance(last_close, sup[0]) < 1.0
+                ),
+            }
 
     setup = classify_setup(klines, ticker24)
     risk = build_risk_management(spot_price, klines, setup["type"])
@@ -1363,6 +1432,11 @@ def main() -> int:
     parser.add_argument("--slippage-pct", type=float, default=DEFAULT_SLIPPAGE_PCT)
     parser.add_argument("--out")
     parser.add_argument("--pretty", action="store_true")
+    parser.add_argument(
+        "--no-raw",
+        action="store_true",
+        help="Omitir la sección 'raw' (~10x más liviano, ideal para LLMs).",
+    )
     args = parser.parse_args()
 
     try:
@@ -1382,6 +1456,8 @@ def main() -> int:
         traceback.print_exc()
         return 2
 
+    if args.no_raw and "raw" in result:
+        del result["raw"]
     payload = json.dumps(result, indent=2 if args.pretty else None, ensure_ascii=False)
     if args.out:
         Path(args.out).write_text(payload, encoding="utf-8")

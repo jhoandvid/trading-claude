@@ -15,4 +15,7 @@ def get_ticker_price(symbol: str) -> dict:
         "symbol": raw["symbol"],
         "price": float(raw["price"]),
     }
-print(get_ticker_price("BTCUSDT"))
+
+
+if __name__ == "__main__":
+    print(get_ticker_price("BTCUSDT"))

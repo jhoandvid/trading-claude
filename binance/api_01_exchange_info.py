@@ -44,4 +44,7 @@ def get_exchange_info(symbol: str) -> dict:
         "minNotional": notional.get("minNotional"),
         "serverTime": raw.get("serverTime"),
     }
-print(get_exchange_info("BTCUSDT"))
+
+
+if __name__ == "__main__":
+    print(get_exchange_info("BTCUSDT"))

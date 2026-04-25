@@ -1,0 +1,164 @@
+{
+  "decisionId": "ETH-2026-04-25T17:03:47.582-0500",
+  "timestamp": {
+    "iso": "2026-04-25T17:03:47.582-0500",
+    "epochMs": 1777154627582,
+    "fecha": "2026-04-25",
+    "hora": "17",
+    "minuto": "03",
+    "segundo": "47",
+    "milisegundo": "582",
+    "tz": "America/Bogota (UTC-05:00)"
+  },
+  "activo": {
+    "token": "ETH",
+    "quote": "USDT",
+    "symbol": "ETHUSDT",
+    "interval": "1h"
+  },
+  "snapshot": {
+    "precioActual": 2315.34,
+    "setupType": "RANGE_PLAY",
+    "setupConfidence": "MEDIUM",
+    "setupScorePct": 75.8,
+    "executionScorePct": 58.4,
+    "accionSistema": "AVOID",
+    "trend1h": "BAJISTA",
+    "structure1h": "LATERAL",
+    "trend4h": "LATERAL",
+    "trend1d": "LATERAL",
+    "rsi14_1h": 49.89,
+    "rsi14_4h": 45.87,
+    "rsi14_1d": 54.56,
+    "relativeVolume": 0.8,
+    "atrPctOfPrice": 0.321,
+    "positionInRange24hPct": 65.23
+  },
+  "estrategia": {
+    "tipo": "RANGE_PLAY",
+    "lado": "LONG",
+    "decisionFinal": "ESPERAR_LIMIT_EN_SOPORTE",
+    "razonamiento": "Setup de rango con soporte muy fuerte (18 toques). No comprar al precio actual porque está a 65% del rango y a <1% de resistencia 4h en 2329.93. Plan: poner orden LIMIT BUY en piso de rango y dejar que el mercado venga."
+  },
+  "plan": {
+    "escenarioPrincipal": {
+      "id": "A",
+      "nombre": "Compra pullback al soporte",
+      "compra": 2300.24,
+      "compraDeltaPct": -0.65,
+      "vendeTp1": 2370.16,
+      "vendeTp1GananciaPct": 3.04,
+      "vendeTp2": 2393.1,
+      "vendeTp2GananciaPct": 4.04,
+      "stop": 2298.39,
+      "stopPerdidaPct": 0.08,
+      "rrTp1Bruto": 3.23,
+      "rrTp1Neto": 2.22,
+      "rrTp2Bruto": 4.59,
+      "rrTp2Neto": 3.25,
+      "tipoOrden": "LIMIT BUY",
+      "requisitosEjecucion": [
+        "Vela 1h cerrando arriba de 2300.245",
+        "candleConfirmation.confirmationScore >= 60",
+        "microstructure.consensusBias != BEARISH",
+        "relativeVolume >= 0.7"
+      ],
+      "invalidaSi": "Cierre 1h debajo de 2298.39 con volumen"
+    },
+    "escenarioAlternativo": {
+      "id": "B",
+      "nombre": "Compra confirmacion de breakout",
+      "compraSiRompe": 2373.88,
+      "vendeTp1": 2421.36,
+      "vendeTp2": 2468.83,
+      "stop": 2370.16,
+      "requisitosEjecucion": [
+        "Cierre 1h arriba de 2373.88",
+        "relativeVolume >= 1.5",
+        "Retesteo exitoso del nivel roto",
+        "consensusBias = BULLISH o NEUTRAL"
+      ],
+      "invalidaSi": "Vuelve debajo de 2370.16 en menos de 2 velas"
+    }
+  },
+  "bloqueosActivos": [
+    {
+      "regla": "UNCONFIRMED_CANDLE",
+      "severidad": "MEDIUM",
+      "razon": "Vela 1h sin cerrar (0.4 min restantes)"
+    },
+    {
+      "regla": "NEAR_MAJOR_RESISTANCE_4h",
+      "severidad": "MEDIUM",
+      "razon": "Precio a <1% de resistencia 4h en 2329.93"
+    }
+  ],
+  "nivelesClave": {
+    "soportes": [
+      {
+        "precio": 2300.24,
+        "toques": 18,
+        "fuerza": 100
+      },
+      {
+        "precio": 2281.55,
+        "toques": 6,
+        "fuerza": 90
+      },
+      {
+        "precio": 2257.95,
+        "toques": 4,
+        "fuerza": 72
+      }
+    ],
+    "resistencias": [
+      {
+        "precio": 2370.16,
+        "toques": 10,
+        "fuerza": 90
+      },
+      {
+        "precio": 2393.1,
+        "toques": 7,
+        "fuerza": 90
+      },
+      {
+        "precio": 2419.21,
+        "toques": 2,
+        "fuerza": 36
+      }
+    ]
+  },
+  "evaluacionPosterior": {
+    "estado": "PARCIAL",
+    "fechaEvaluacion": "2026-04-25T17:12:04.117-05:00",
+    "horizonteVelas": 1,
+    "intervalo": "1h",
+    "primeraVelaIso": "2026-04-25T22:00:00Z",
+    "ultimaVelaIso": "2026-04-25T22:59:59.999000Z",
+    "precioMaxPosterior": 2317.35,
+    "precioMinPosterior": 2315.09,
+    "escenarioA_LimitPullback": {
+      "ordenEjecutada": false,
+      "razon": "Precio nunca tocó el trigger en el horizonte evaluado",
+      "tp1Alcanzado": false,
+      "tp2Alcanzado": false,
+      "stopAlcanzado": false,
+      "resultadoPct": 0.0,
+      "resultadoUsdtPorUnidad": 0.0,
+      "velasHastaResolucion": null
+    },
+    "escenarioB_Breakout": {
+      "ordenEjecutada": false,
+      "razon": "Precio nunca tocó el trigger en el horizonte evaluado",
+      "tp1Alcanzado": false,
+      "tp2Alcanzado": false,
+      "stopAlcanzado": false,
+      "resultadoPct": 0.0,
+      "resultadoUsdtPorUnidad": 0.0,
+      "velasHastaResolucion": null
+    },
+    "decisionAcertada": null,
+    "leccion": "INDETERMINADA: el sistema esperó y ningún escenario disparó en el horizonte evaluado. Decisión defensiva sin contradicción."
+  }
+}
