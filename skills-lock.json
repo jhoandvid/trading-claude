@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "trading-signal": {
+      "source": "binance/binance-skills-hub",
+      "sourceType": "github",
+      "computedHash": "3363c91803ed82496034ffbf54b5407ecc9a7713c994fe941328b7be6fccdcf6"
+    }
+  }
+}
