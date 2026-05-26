@@ -1360,6 +1360,11 @@ def analyze_crypto(
         "liquidityScore": depth.get("liquidityScore") if _is_ok(depth) else None,
         "spreadPct": depth.get("spreadPct") if _is_ok(depth) else None,
         "fundingBias": funding.get("biasLabel") if _is_ok(funding) else None,
+        "fundingRatePct": funding.get("latestFundingPct") if _is_ok(funding) else None,
+        "fundingAvg24hPct": funding.get("avgFunding24hPct") if _is_ok(funding) else None,
+        "fundingAnnualizedPct": funding.get("annualizedPct") if _is_ok(funding) else None,
+        "openInterest": oi.get("openInterest") if _is_ok(oi) else None,
+        "openInterestNotionalUSDT": oi.get("openInterestNotional") if _is_ok(oi) else None,
     }
 
     # Limpiamos allCandles del raw para no inflar el JSON.
