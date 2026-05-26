@@ -53,6 +53,10 @@ from binance.api_11_futures_24h import get_futures_ticker_24h  # noqa: E402
 from binance.api_12_open_interest import get_open_interest  # noqa: E402
 from binance.api_13_funding_rate import get_funding_rate  # noqa: E402
 from binance.api_14_premium_index import get_premium_index  # noqa: E402
+from binance.api_15_top_trader_ratio import get_top_trader_ratio  # noqa: E402
+from binance.api_16_taker_volume import get_taker_volume  # noqa: E402
+from binance.api_17_oi_history import get_oi_history  # noqa: E402
+from binance.api_18_global_ratio import get_global_ratio  # noqa: E402
 
 DEFAULT_FEE_PCT_ROUND_TRIP = 0.2  # 0.1% maker/taker x 2 lados
 DEFAULT_SLIPPAGE_PCT = 0.03
@@ -900,7 +904,8 @@ def compute_execution_score(
 
 
 def evaluate_blocking_rules(
-    klines, micro, risk, cost_rr, candle_status, higher_tf, setup_type, supports, spot_price
+    klines, micro, risk, cost_rr, candle_status, higher_tf, setup_type, supports, spot_price,
+    sentiment_data: dict | None = None,
 ) -> list[dict]:
     rules: list[dict] = []
 
@@ -979,6 +984,45 @@ def evaluate_blocking_rules(
                 "triggered": True,
                 "severity": "MEDIUM",
                 "reason": f"Precio a <1% de resistencia {tf}",
+            })
+
+    # Nuevas reglas basadas en sentimiento institucional
+    if sentiment_data:
+        # CVD futuros vendedor sostenido = dinero real saliendo
+        if sentiment_data.get("cvdFuturesBias") == "VENDEDOR":
+            from binance.api_16_taker_volume import _cvd_label
+            pass  # Solo bloquea si es sostenido (ver abajo)
+
+        # Divergencia crítica: retail long + institucionales cortos
+        alerts = sentiment_data.get("bearishAlerts", [])
+        for alert in alerts:
+            if "DIVERGENCIA CRÍTICA" in alert:
+                rules.append({
+                    "rule": "INSTITUTIONAL_BEARISH_DIVERGENCE",
+                    "triggered": True,
+                    "severity": "HIGH",
+                    "reason": alert,
+                })
+                break
+
+        # OI cae mientras precio sube = subida no confiable (short covering)
+        if sentiment_data.get("oiInterpretation") == "SHORT_COVERING_SUBIDA_DEBIL":
+            rules.append({
+                "rule": "OI_SHORT_COVERING_WEAK_RALLY",
+                "triggered": True,
+                "severity": "MEDIUM",
+                "reason": "Precio sube pero OI cayendo — short covering, no hay compradores nuevos",
+            })
+
+        # Top traders en posición extrema contraria al setup
+        top_label = sentiment_data.get("topTraderLabel")
+        top_ratio_val = sentiment_data.get("topTraderRatio")
+        if setup_type not in ("NO_SETUP",) and top_label == "LONGS_EXTREMO":
+            rules.append({
+                "rule": "CROWDED_LONG_TOP_TRADERS",
+                "triggered": True,
+                "severity": "MEDIUM",
+                "reason": f"Top traders ratio={top_ratio_val} — trade muy concurrido, riesgo de long squeeze",
             })
 
     return rules
@@ -1188,7 +1232,119 @@ def build_recommendation(
 
 
 # ---------------------------------------------------------------------------
-# 15. orquestador
+# 15. sentiment data (nuevo — datos institucionales de derivados)
+# ---------------------------------------------------------------------------
+
+
+def _build_sentiment_data(
+    top_ratio: dict,
+    taker_vol: dict,
+    oi_hist: dict,
+    global_ratio: dict,
+    cvd_spot: dict,
+) -> dict:
+    """Consolida señales de posicionamiento institucional en un bloque único."""
+    signals: list[str] = []
+    alerts: list[str] = []
+
+    # Top trader ratio
+    top_label = None
+    top_ratio_val = None
+    if _is_ok(top_ratio) and top_ratio.get("byAccount", {}).get("available"):
+        acct = top_ratio["byAccount"]
+        top_label = acct.get("label")
+        top_ratio_val = acct.get("ratio")
+        trend = acct.get("trend")
+        if top_label in ("LONGS_EXTREMO",):
+            alerts.append(f"Top traders EXTREMO LONG ({top_ratio_val}x) — trade saturado")
+        elif top_label in ("SHORTS_EXTREMO",):
+            alerts.append(f"Top traders EXTREMO SHORT ({top_ratio_val}x) — squeeze posible")
+        if trend == "DECRECIENDO":
+            signals.append("Top traders reduciendo longs (distribución posible)")
+        elif trend == "CRECIENDO":
+            signals.append("Top traders aumentando longs (convicción alcista)")
+
+    # Taker volume (CVD futuros desde klines de futuros)
+    cvd_futures_bias = None
+    if _is_ok(taker_vol) and taker_vol.get("available"):
+        cvd_futures_bias = taker_vol.get("cvdBias")
+        cvd_label = taker_vol.get("cvdLabel")
+        cvd_trend = taker_vol.get("cvdTrend")
+        buy_pct = taker_vol.get("cvdBuyPct", 50)
+        if cvd_label in ("VENDEDOR_FUERTE",):
+            alerts.append(f"Futuros CVD: VENTA AGRESIVA dominante ({buy_pct}% compradores)")
+        elif cvd_label in ("COMPRADOR_FUERTE",):
+            signals.append(f"Futuros CVD: COMPRA AGRESIVA dominante ({buy_pct}% compradores)")
+        if cvd_trend in ("VENDEDOR_SOSTENIDO",):
+            alerts.append("CVD futuros: ventas sostenidas en últimas horas")
+        elif cvd_trend in ("COMPRADOR_SOSTENIDO",):
+            signals.append("CVD futuros: compras sostenidas en últimas horas")
+
+    # OI history
+    oi_interp = None
+    if _is_ok(oi_hist) and oi_hist.get("available"):
+        oi_interp = oi_hist.get("interpretation")
+        oi_trend = oi_hist.get("trend")
+        if oi_interp == "TENDENCIA_FUERTE_ALCISTA":
+            signals.append("OI + precio subiendo juntos — tendencia con convicción")
+        elif oi_interp == "SHORT_COVERING_SUBIDA_DEBIL":
+            alerts.append("Precio sube pero OI cae — short covering, subida poco confiable")
+        elif oi_interp == "TENDENCIA_BAJISTA_CON_CONVICCION":
+            alerts.append("Precio cae + OI sube — shorts nuevos entrando con convicción")
+
+    # Global ratio (señal contraria)
+    contrarian = None
+    if _is_ok(global_ratio) and global_ratio.get("available"):
+        contrarian = global_ratio.get("contrarianSignal")
+        vs_top = global_ratio.get("vsTopTraders")
+        if contrarian:
+            alerts.append(contrarian)
+        if vs_top == "DIVERGENCIA_BAJISTA — retail long, top traders cortos":
+            alerts.append("DIVERGENCIA CRÍTICA: retail muy long, institucionales cortos")
+        elif vs_top and "ALCISTA" in vs_top:
+            signals.append("Institucionales largos mientras retail está corto — squeeze setup")
+
+    # CVD spot
+    if cvd_spot.get("bias") == "VENDEDOR":
+        alerts.append(f"CVD spot: vendedores dominan ({cvd_spot.get('buyPct20')}% compradores)")
+
+    # Score resumen 0-100
+    bullish_signals = len(signals)
+    bearish_alerts = len(alerts)
+    if bullish_signals + bearish_alerts == 0:
+        sentiment_score = 50
+    else:
+        sentiment_score = round(
+            bullish_signals / (bullish_signals + bearish_alerts) * 100
+        )
+
+    if sentiment_score >= 70:
+        sentiment_label = "ALCISTA"
+    elif sentiment_score >= 55:
+        sentiment_label = "LEVE_ALCISTA"
+    elif sentiment_score <= 30:
+        sentiment_label = "BAJISTA"
+    elif sentiment_score <= 45:
+        sentiment_label = "LEVE_BAJISTA"
+    else:
+        sentiment_label = "NEUTRO"
+
+    return {
+        "sentimentScore": sentiment_score,
+        "sentimentLabel": sentiment_label,
+        "bullishSignals": signals,
+        "bearishAlerts": alerts,
+        "topTraderLabel": top_label,
+        "topTraderRatio": top_ratio_val,
+        "cvdFuturesBias": cvd_futures_bias,
+        "cvdSpotBias": cvd_spot.get("bias"),
+        "oiInterpretation": oi_interp,
+        "contrarianSignal": contrarian,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 16. orquestador
 # ---------------------------------------------------------------------------
 
 
@@ -1238,10 +1394,14 @@ def analyze_crypto(
     }
     if include_futures:
         tasks.update({
-            "f24":     (get_futures_ticker_24h, (symbol,)),
-            "oi":      (get_open_interest,      (symbol,)),
-            "funding": (get_funding_rate,       (symbol,)),
-            "premium": (get_premium_index,      (symbol,)),
+            "f24":          (get_futures_ticker_24h, (symbol,)),
+            "oi":           (get_open_interest,      (symbol,)),
+            "funding":      (get_funding_rate,       (symbol,)),
+            "premium":      (get_premium_index,      (symbol,)),
+            "top_ratio":    (get_top_trader_ratio,   (symbol,)),
+            "taker_vol":    (get_taker_volume,        (symbol,)),
+            "oi_hist":      (get_oi_history,          (symbol,)),
+            "global_ratio": (get_global_ratio,        (symbol,)),
         })
     if include_higher_tf:
         tasks.update({
@@ -1278,16 +1438,44 @@ def analyze_crypto(
 
     funding = {"error": True, "message": "Futures omitido"}
     futures_block = None
+    top_ratio = {"error": True}
+    taker_vol = {"error": True}
+    oi_hist = {"error": True}
+    global_ratio = {"error": True}
     if include_futures:
         oi = results["oi"]
         if spot_price and _is_ok(oi) and oi.get("openInterest"):
             oi["openInterestNotional"] = round(oi["openInterest"] * spot_price, 2)
         funding = results["funding"]
+        top_ratio = results.get("top_ratio", {"error": True})
+        taker_vol = results.get("taker_vol", {"error": True})
+        # Pasar price_change_pct al oi_hist para interpretación combinada
+        price_chg = ticker24.get("priceChangePercent") if _is_ok(ticker24) else None
+        oi_hist = results.get("oi_hist", {"error": True})
+        if _is_ok(oi_hist) and price_chg is not None:
+            from binance.api_17_oi_history import interpret_oi_price, _oi_trend
+            # Re-interpretar con el precio actual (la llamada paralela no tenía el precio)
+            if oi_hist.get("trend"):
+                oi_hist["interpretation"] = interpret_oi_price(oi_hist["trend"], price_chg)
+        global_ratio = results.get("global_ratio", {"error": True})
+        # Pasar top trader ratio a global para calcular divergencia
+        top_acct_ratio = None
+        if _is_ok(top_ratio) and top_ratio.get("byAccount", {}).get("available"):
+            top_acct_ratio = top_ratio["byAccount"]["ratio"]
+            if _is_ok(global_ratio) and global_ratio.get("available"):
+                from binance.api_18_global_ratio import _vs_top_traders
+                global_ratio["vsTopTraders"] = _vs_top_traders(
+                    global_ratio["ratio"], top_acct_ratio
+                )
         futures_block = {
             "ticker24h": results["f24"],
             "openInterest": oi,
             "fundingRate": funding,
             "premiumIndex": results["premium"],
+            "topTraderRatio": top_ratio,
+            "takerVolume": taker_vol,
+            "openInterestHist": oi_hist,
+            "globalRatio": global_ratio,
         }
 
     higher_tf = {}
@@ -1339,9 +1527,14 @@ def analyze_crypto(
         micro, candle_conf, candle_status, klines, risk, cost_rr,
         higher_tf, setup["type"], spot_price,
     )
+
+    # CVD y sentiment deben calcularse ANTES de blocking rules (las usan)
+    cvd_spot = klines.get("cvd", {}) if _is_ok(klines) else {}
+    sentiment_data = _build_sentiment_data(top_ratio, taker_vol, oi_hist, global_ratio, cvd_spot)
+
     blocking = evaluate_blocking_rules(
         klines, micro, risk, cost_rr, candle_status, higher_tf,
-        setup["type"], supports_list, spot_price,
+        setup["type"], supports_list, spot_price, sentiment_data,
     )
     trade_plan = build_trade_plan_conditional(setup, klines, risk, levels_strength, entries)
     recommendation = build_recommendation(
@@ -1365,6 +1558,10 @@ def analyze_crypto(
         "fundingAnnualizedPct": funding.get("annualizedPct") if _is_ok(funding) else None,
         "openInterest": oi.get("openInterest") if _is_ok(oi) else None,
         "openInterestNotionalUSDT": oi.get("openInterestNotional") if _is_ok(oi) else None,
+        # Nuevos: CVD spot
+        "cvdSpotBias": cvd_spot.get("bias"),
+        "cvdSpotBuyPct": cvd_spot.get("buyPct20"),
+        "cvdSpotTrend": cvd_spot.get("trend"),
     }
 
     # Limpiamos allCandles del raw para no inflar el JSON.
@@ -1395,6 +1592,7 @@ def analyze_crypto(
         "riskManagement": risk,
         "costAdjustedRR": cost_rr,
         "microstructure": micro,
+        "sentimentData": sentiment_data,
         "tradePlan": trade_plan,
         "recommendation": recommendation,
         "raw": {

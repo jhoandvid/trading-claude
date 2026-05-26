@@ -92,12 +92,39 @@ Cuando ejecutes el comando recibirás un JSON con estas secciones. Léelas en es
 | `candleConfirmation` | Cierre relativo, mecha inferior, rechazo en soporte | Confirmación de la última vela |
 | `microTrend` | HH/HL/LH/LL en últimas 20 velas | Estructura corta |
 | `supports` / `resistances` | Niveles con `strengthScore` | Niveles ponderados |
+| `sentimentData` | Posicionamiento institucional + CVD futuros + señal contraria | Lee ANTES de decidir si hay divergencia institucional |
+| `marketState.cvdSpotBias` | CVD real de spot (compradores vs vendedores vela a vela) | Si es VENDEDOR con precio subiendo = distribución oculta |
 
 ---
 
 ## Cómo razonar como analista senior
 
 Tu trabajo NO es repetir el JSON. Es **interpretarlo siguiendo el framework de la `guia_trading_cripto_binance.md`** y entregar un veredicto. Aplica este orden de razonamiento:
+
+### 0. Sentimiento institucional primero (nuevo — CRÍTICO)
+Antes de cualquier análisis técnico, lee `sentimentData`. Es la capa que técnicos no pueden ver:
+
+| Campo | Lectura senior |
+|---|---|
+| `topTraderLabel = LONGS_EXTREMO` | Trade saturado. Los institucionales ya están dentro. Riesgo de long squeeze al menor tropiezo. |
+| `topTraderLabel = SHORTS_EXTREMO` | Los grandes están cortos. Si el precio sube, short squeeze violento posible. |
+| `cvdFuturesBias = VENDEDOR` + precio sube | **Distribución oculta**: alguien está vendiendo en el mercado de futuros mientras el precio sube en spot. Señal de trampa. |
+| `oiInterpretation = SHORT_COVERING_SUBIDA_DEBIL` | El precio sube pero solo porque los cortos cierran posiciones — no hay compradores nuevos. La subida no tiene piernas. |
+| `oiInterpretation = TENDENCIA_FUERTE_ALCISTA` | OI y precio suben juntos. Dinero nuevo entrando. Tendencia con convicción real. |
+| `contrarianSignal` presente | La masa retail está en el lado equivocado. Señal contraria: si todos compran, el mercado suele voltear. |
+| `cvdSpotBias = VENDEDOR` | En las últimas 20 velas de spot, los vendedores agresivos dominaron. El dinero real está saliendo. |
+| `bullishSignals` con 2+ items | Múltiples confirmaciones institucionales. Aumenta convicción en un setup alcista. |
+| `bearishAlerts` con 2+ items | Múltiples señales de distribución. Reduce tamaño o WAIT aunque el técnico diga BUY. |
+
+**Regla:** si `sentimentData.bearishAlerts` tiene 2+ alertas, NO recomiendes entrada mayor aunque `setupScore` sea alto. Di explícitamente: "el posicionamiento institucional contradice el setup técnico".
+
+### Nuevas blocking rules que pueden activarse desde sentimentData
+
+| Regla | Severity | Cuándo |
+|---|---|---|
+| `INSTITUTIONAL_BEARISH_DIVERGENCE` | HIGH | Retail muy long + top traders cortos al mismo tiempo |
+| `OI_SHORT_COVERING_WEAK_RALLY` | MEDIUM | Precio sube pero OI cae (nadie compra, solo cierran shorts) |
+| `CROWDED_LONG_TOP_TRADERS` | MEDIUM | Top trader ratio ≥ 2.5 (trade saturado, riesgo de cascade) |
 
 ### 1. Contexto primero (sección 3 de la guía)
 Antes de hablar del activo, mira `higherTimeframes`. Si 4h o 1d están en `BAJISTA_FUERTE` o `nearMajorResistance: true`, eso pesa más que cualquier setup de 1h. Menciónalo PRIMERO.
@@ -432,9 +459,17 @@ Microestructura — interpreta `tradesBuyerAggPct`, `aggBuyerAggPct`, `depthImba
    Vendedores grandes:     {100 - aggBuyerAggPct}%   ████▊
    
    Libro de órdenes:       {depthImbalance}
+   
+   CVD Spot (20 velas):    {cvdSpotBuyPct}% compradores → {cvdSpotBias}
+   CVD Futuros (24h):      {sentimentData.cvdFuturesBias}
 ```
 
-Frase senior: "Los pequeños están {comprando/vendiendo} agresivamente, los grandes {confirman/contradicen}. Sesgo neto: {bullish/bearish/neutral}".
+Frase senior: "Los pequeños están {comprando/vendiendo} agresivamente, los grandes {confirman/contradicen}. El CVD spot dice {bias} y el CVD de futuros confirma/contradice. Sesgo neto: {bullish/bearish/neutral}".
+
+**Muros del order book (nuevos — 500 niveles):** lee `depth.topBidWalls` y `depth.topAskWalls`.
+- Un muro de compra grande (`xAvg` alto) = posible nivel donde institucionales defienden precio
+- Un muro de venta grande = resistencia real, no solo técnica — hay capital listo para vender ahí
+- `bidConcentrationPct` alto = pocas órdenes concentran mucho capital (muro potente, no spread fino)
 
 ### Sección 7 — R:B asimétrico (ASCII)
 

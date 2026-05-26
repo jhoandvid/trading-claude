@@ -136,6 +136,32 @@ def get_klines_analysis(
     if last_atr is not None:
         suggested_stop = round(last_close - 1.5 * last_atr, 8)
 
+    # CVD (Cumulative Volume Delta) desde takerBuyBaseVolume
+    # Cada vela ya trae cuánto compró el taker agresivo (campo 9 de klines)
+    taker_buy = [c["takerBuyBaseVolume"] for c in candles]
+    taker_sell = [c["volume"] - c["takerBuyBaseVolume"] for c in candles]
+    window20_buy = sum(taker_buy[-20:])
+    window20_sell = sum(taker_sell[-20:])
+    total20 = window20_buy + window20_sell
+    cvd_buy_pct = round(window20_buy / total20 * 100, 2) if total20 > 0 else 50.0
+
+    # Tendencia del CVD: acumulado en las últimas 20 vs las 20 anteriores
+    if len(taker_buy) >= 40:
+        prev_buy = sum(taker_buy[-40:-20])
+        prev_sell = sum(taker_sell[-40:-20])
+        prev_total = prev_buy + prev_sell
+        prev_pct = prev_buy / prev_total * 100 if prev_total > 0 else 50.0
+        if cvd_buy_pct > prev_pct + 3:
+            cvd_trend = "AUMENTANDO_COMPRADORES"
+        elif cvd_buy_pct < prev_pct - 3:
+            cvd_trend = "AUMENTANDO_VENDEDORES"
+        else:
+            cvd_trend = "ESTABLE"
+    else:
+        cvd_trend = "INSUFICIENTE"
+
+    cvd_bias = "COMPRADOR" if cvd_buy_pct >= 52 else "VENDEDOR" if cvd_buy_pct <= 48 else "NEUTRO"
+
     return {
         "endpoint": "klines",
         "symbol": symbol.upper(),
@@ -159,6 +185,12 @@ def get_klines_analysis(
             "bbMiddle": last_bb_middle,
             "bbLower": last_bb_lower,
             "relativeVolume": rel_vol,
+        },
+        "cvd": {
+            "buyPct20": cvd_buy_pct,
+            "sellPct20": round(100 - cvd_buy_pct, 2),
+            "bias": cvd_bias,
+            "trend": cvd_trend,
         },
         "trend": trend,
         "structure": structure,
